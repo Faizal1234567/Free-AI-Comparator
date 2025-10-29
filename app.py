@@ -1,19 +1,3 @@
-# Create the .streamlit directory
-!mkdir -p .streamlit
-
-# Create the secrets.toml file and add your secrets
-# Replace "YOUR_OPENROUTER_API_KEY" and "YOUR_ADMIN_PASSWORD" with your actual values
-secrets_content = """
-OPENROUTER_API_KEY = "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"
-ADMIN_PASS = "P@ssword2025"
-"""
-
-with open(".streamlit/secrets.toml", "w") as f:
-    f.write(secrets_content)
-
-print("Created .streamlit/secrets.toml with placeholder values. Please replace them with your actual secrets.")
-
-
 # app.py - Robust EduChat AI (fixed)
 import streamlit as st
 import requests
@@ -22,11 +6,6 @@ import os
 import uuid
 from datetime import datetime
 from pathlib import Path
-
-# ---------- Use st.secrets for secure config ----------
-OPENROUTER_API_KEY = st.secrets.get("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")
-ADMIN_PASS = st.secrets.get("P@ssword2025")
-
 # ---------- Requirements check: show admin-friendly error if missing libs ----------
 MISSING_PKGS = []
 try:

@@ -1,25 +1,31 @@
+# app.py - Robust EduChat AI (fixed)
 import streamlit as st
 import requests
 import json
 import os
 import uuid
 from datetime import datetime
-import nltk
-from nltk import pos_tag, word_tokenize
 from pathlib import Path
 
-# ===========================
-# 🔒 Secure Setup
-# ===========================
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-ADMIN_PASS = os.getenv("ADMIN_PASS", None)
+# ---------- Use st.secrets for secure config ----------
+OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY")
+ADMIN_PASS = st.secrets.get("ADMIN_PASS")
+
+# ---------- Requirements check: show admin-friendly error if missing libs ----------
+MISSING_PKGS = []
+try:
+    import nltk
+    from nltk import pos_tag, word_tokenize
+    nltk.download('punkt', quiet=True)
+    nltk.download('averaged_perceptron_tagger', quiet=True)
+except Exception as e:
+    MISSING_PKGS.append("nltk")
+
+# ---------- Data directory ----------
 DATA_DIR = Path("chat_data")
 DATA_DIR.mkdir(exist_ok=True)
 
-nltk.download('punkt', quiet=True)
-nltk.download('averaged_perceptron_tagger', quiet=True)
-
-# === Hide Streamlit default UI (menu, footer, GitHub, etc.) ===
+# ---------- Hide default Streamlit menu/footer/GitHub links ----------
 st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
@@ -29,18 +35,14 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# ===========================
-# 🧩 Free Models
-# ===========================
+# ---------- Free models ----------
 FREE_MODELS = [
     "nvidia/nemotron-nano-9b-v2:free",
     "meta-llama/llama-3.3-8b-instruct:free",
     "minimax/minimax-m2:free"
 ]
 
-# ===========================
-# 🧠 Bloom’s Taxonomy
-# ===========================
+# ---------- Bloom verb lists ----------
 BLOOMS_LEVELS = {
     "Knowledge": ["define", "list", "name", "recall", "identify", "label", "state"],
     "Comprehension": ["describe", "explain", "summarize", "paraphrase", "classify", "discuss"],
@@ -51,6 +53,8 @@ BLOOMS_LEVELS = {
 }
 
 def classify_blooms_level(text):
+    if "nltk" in MISSING_PKGS:
+        return "Not Classified (nltk missing)"
     tokens = word_tokenize(text.lower())
     tagged = pos_tag(tokens)
     verbs = [word for word, tag in tagged if tag.startswith("VB")]
@@ -61,185 +65,179 @@ def classify_blooms_level(text):
                 matched.append(level)
     return max(set(matched), key=matched.count) if matched else "Not Classified"
 
-# ===========================
-# 🔑 Admin Authentication
-# ===========================
+# ---------- Admin auth ----------
 def is_admin():
+    # admin session flag
     if "admin_authenticated" not in st.session_state:
         st.session_state.admin_authenticated = False
 
+    # Already authenticated
     if st.session_state.admin_authenticated:
         return True
 
+    # Provide a small admin login widget in the sidebar
     with st.sidebar:
         st.subheader("🔒 Admin Login")
-        password = st.text_input("Enter admin password:", type="password")
-        if password and password == ADMIN_PASS:
-            st.session_state.admin_authenticated = True
-            st.success("✅ Admin access granted")
-            return True
-        elif password and password != ADMIN_PASS:
-            st.error("❌ Incorrect password")
+        pwd = st.text_input("Enter admin password:", type="password")
+        if pwd:
+            if ADMIN_PASS is None:
+                st.error("ADMIN_PASS not set in Streamlit Secrets. Add ADMIN_PASS in Secrets.")
+            elif pwd == ADMIN_PASS:
+                st.session_state.admin_authenticated = True
+                st.success("✅ Admin access granted")
+                return True
+            else:
+                st.error("❌ Incorrect password")
     return False
 
-# ===========================
-# 🧠 Send Message to OpenRouter
-# ===========================
+# ---------- Message sending ----------
 def send_openrouter_message(message, model_name):
-    if not OPENROUTER_API_KEY:
-        return "⚠️ Missing API key. Please add OPENROUTER_API_KEY in Secrets."
+    # Basic checks
+    if OPENROUTER_API_KEY is None:
+        return "⚠️ OPENROUTER_API_KEY not set in Streamlit Secrets."
+
+    # Block accidentally using paid models
     paid_keywords = ["pro", "openai", "anthropic", "google", "gpt"]
     if any(k in model_name.lower() for k in paid_keywords):
-        return f"🚫 '{model_name}' blocked — paid model not allowed."
+        return f"🚫 '{model_name}' blocked — paid models not allowed."
+
+    # Build request payload for single-turn prompt (safer)
+    payload = {
+        "model": model_name,
+        "messages": [{"role":"user","content": message}],
+        "max_tokens": 800
+    }
+
     try:
-        response = requests.post(
+        resp = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
             },
-            data=json.dumps({
-                "model": model_name,
-                "messages": [{"role": "user", "content": message}]
-            }),
-            timeout=40
+            data=json.dumps(payload),
+            timeout=30
         )
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        # If HTTP error, return readable string
+        if resp.status_code != 200:
+            return f"⚠️ Error {resp.status_code}: {resp.text}"
+        j = resp.json()
+        # Safely get content
+        try:
+            return j["choices"][0]["message"]["content"]
+        except Exception:
+            return f"⚠️ Unexpected response format: {j}"
     except Exception as e:
-        return f"⚠️ Error: {str(e)}"
+        return f"⚠️ Request error: {e}"
 
-# ===========================
-# 💾 File Operations (Persistence)
-# ===========================
-def save_history(session_id, data):
-    with open(DATA_DIR / f"{session_id}.json", "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+# ---------- Persistence ----------
+def save_history_to_file(session_id, data):
+    try:
+        with open(DATA_DIR / f"{session_id}.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        # Admin-only message
+        st.session_state._last_save_error = str(e)
+        return False
 
-def load_history(session_id):
-    file_path = DATA_DIR / f"{session_id}.json"
-    if file_path.exists():
-        with open(file_path, "r", encoding="utf-8") as f:
+def load_history_from_file(session_id):
+    p = DATA_DIR / f"{session_id}.json"
+    if p.exists():
+        with open(p, "r", encoding="utf-8") as f:
             return json.load(f)
     return []
 
-# ===========================
-# 🎨 UI Setup
-# ===========================
-st.set_page_config(page_title="EduChat AI | Student Learning Assistant", page_icon="🎓", layout="centered")
+# ---------- UI ----------
+st.set_page_config(page_title="EduChat AI — Fixed", page_icon="🎓", layout="centered")
+st.title("🎓 EduChat AI (Fixed)")
 
-st.markdown("<h1 style='text-align:center; color:#1f2937;'>🎓 EduChat AI</h1>", unsafe_allow_html=True)
-st.markdown("<p style='text-align:center; color:#4b5563;'>AI-based student assistant with Bloom’s Taxonomy and multi-model learning.</p>", unsafe_allow_html=True)
+if MISSING_PKGS:
+    st.warning(f"Missing Python packages: {', '.join(MISSING_PKGS)}. Add them to requirements.txt and redeploy. Admins see more details in sidebar.")
 
-# ===========================
-# 🧠 Session Management
-# ===========================
+# Session essentials
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = load_history(st.session_state.session_id)
+    # load persistent file if exists
+    st.session_state.chat_history = load_history_from_file(st.session_state.session_id)
 if "votes" not in st.session_state:
     st.session_state.votes = {}
 
-# ===========================
-# ⚙️ Admin Panel
-# ===========================
+# Admin sidebar (authenticated)
 if is_admin():
     with st.sidebar:
-        st.header("⚙️ Admin Settings")
-        st.caption(f"🆔 Session: `{st.session_state.session_id}`")
-        st.markdown("---")
+        st.header("⚙️ Admin")
+        st.write("Admin-only settings")
+        sel_model = st.selectbox("Default model (admin-only):", FREE_MODELS, index=2)
+        st.write(f"Session ID: `{st.session_state.session_id}`")
+        if hasattr(st.session_state, "_last_save_error"):
+            st.error(f"Last save error: {st.session_state._last_save_error}")
+else:
+    # hide empty sidebar area for regular users
+    st.sidebar.markdown("")
 
-# ===========================
-# 📜 History Section
-# ===========================
-st.sidebar.header("📚 Chat History")
-all_histories = [f.name.replace(".json", "") for f in DATA_DIR.glob("*.json")]
-selected_history = st.sidebar.selectbox("Select a previous session to view:", ["(Current Session)"] + all_histories)
+# Chat input and model selection
+question = st.text_area("💬 Type your question here:")
+selected_models = st.multiselect("Choose model(s) to compare:", FREE_MODELS, default=[FREE_MODELS[-1]])
 
-if selected_history != "(Current Session)":
-    old_data = load_history(selected_history)
-    st.sidebar.markdown("### 🧠 Previous Chat")
-    for chat in old_data[-3:]:
-        st.sidebar.write(f"💬 {chat.get('user_question')}")
-    if st.sidebar.button("Load Selected Chat"):
-        st.session_state.chat_history = old_data
-        st.sidebar.success("✅ Loaded selected session successfully!")
-
-if st.sidebar.button("➕ Start New Chat"):
-    st.session_state.session_id = str(uuid.uuid4())
-    st.session_state.chat_history = []
-    st.session_state.votes = {}
-    st.experimental_rerun()
-
-# ===========================
-# 💬 Chat Input
-# ===========================
-question = st.text_area("💬 Ask your question:")
-
-selected_models = st.multiselect(
-    "🧠 Choose models to compare:",
-    FREE_MODELS,
-    default=["minimax/minimax-m2:free"]
-)
-
-if st.button("🚀 Get Answers"):
+if st.button("Get Answers"):
     if not question.strip():
-        st.warning("Please enter a valid question.")
+        st.warning("Please type a question.")
     else:
-        blooms_level = classify_blooms_level(question)
-        st.markdown(f"🧩 **Bloom’s Cognitive Level:** `{blooms_level}`")
+        blooms = classify_blooms_level(question)
+        st.markdown(f"**Bloom’s level:** `{blooms}`")
         st.write("---")
 
+        # Fetch results per model and display
         answers = {}
         for model in selected_models:
-            with st.spinner(f"Fetching response from {model}..."):
-                response = send_openrouter_message(question, model)
-                st.markdown(f"### 🤖 {model}")
-                st.write(response)
-                answers[model] = response
+            with st.spinner(f"Querying {model}..."):
+                ans = send_openrouter_message(question, model)
+                st.markdown(f"### Model: `{model}`")
+                st.write(ans)
+                answers[model] = ans
                 st.markdown("---")
 
-        # Vote option
-        best_model = st.radio("Which model gave the best answer?", selected_models, key=str(uuid.uuid4()))
-        st.session_state.votes[question] = best_model
-        st.success(f"✅ You chose: **{best_model}**")
+        # Allow user to choose best answer (radio)
+        if selected_models:
+            best = st.radio("Which answer is best?", selected_models, key=str(uuid.uuid4()))
+            st.success(f"You selected: **{best}**")
+        else:
+            best = None
 
-        # Save chat persistently
-        chat_entry = {
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "user_question": question,
-            "bloom_level": blooms_level,
+        # Save entry to session history and persist to file
+        entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "question": question,
+            "bloom": blooms,
             "answers": answers,
-            "best_model": best_model
+            "selected_best": best
         }
-        st.session_state.chat_history.append(chat_entry)
-        save_history(st.session_state.session_id, st.session_state.chat_history)
+        st.session_state.chat_history.append(entry)
+        saved = save_history_to_file(st.session_state.session_id, st.session_state.chat_history)
+        if not saved:
+            st.warning("Could not save chat history to file (admins see details).")
 
-# ===========================
-# 💾 Download Option (with confirmation)
-# ===========================
+# Show chat history with ability to open previous sessions
+st.markdown("## Your session history")
 if st.session_state.chat_history:
-    if st.checkbox("📦 Download Chat History"):
-        confirm = st.radio("Are you sure you want to download this session?", ("No", "Yes"))
-        if confirm == "Yes":
-            st.download_button(
-                label="⬇️ Download (.json)",
-                data=json.dumps(st.session_state.chat_history, indent=4, ensure_ascii=False),
-                file_name=f"EduChat_Session_{st.session_state.session_id}.json",
-                mime="application/json"
-            )
+    for item in st.session_state.chat_history:
+        st.markdown(f"**{item['timestamp']}** — Q: {item['question']}")
+        st.markdown(f"• Bloom: `{item['bloom']}`")
+        for m, a in item["answers"].items():
+            st.markdown(f"  - `{m}`: {a[:400]}{'...' if len(a) > 400 else ''}")
+        st.markdown(f"• Best: {item.get('selected_best')}")
+        st.markdown("---")
+else:
+    st.info("No chat entries yet. Ask a question to get started.")
 
-# ===========================
-# 📘 Footer
-# ===========================
-st.markdown("---")
-st.markdown(
-    """
-    <div style='text-align:center; color:#6b7280; font-size:14px;'>
-    🧠 <b>EduChat AI</b> — Smart Learning Assistant.<br>
-    Developed by Faizal | Powered by <a href='https://openrouter.ai' target='_blank'>OpenRouter.ai</a>.
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+# Download (ask first)
+if st.session_state.chat_history:
+    if st.checkbox("I want to download this session data"):
+        confirm = st.radio("Confirm download?", ["No", "Yes"])
+        if confirm == "Yes":
+            st.download_button("Download JSON", data=json.dumps(st.session_state.chat_history, indent=2, ensure_ascii=False),
+                                file_name=f"edu_chat_{st.session_state.session_id}.json", mime="application/json")
+
+st.caption("If problems persist, open 'Manage app' → Logs on Streamlit Cloud (admins).")

@@ -4,13 +4,34 @@ import json
 import os
 import uuid
 from datetime import datetime
+import nltk
+from nltk import pos_tag, word_tokenize
+from pathlib import Path
 
 # ===========================
 # 🔒 Secure Setup
 # ===========================
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+ADMIN_PASS = os.getenv("ADMIN_PASS", None)
+DATA_DIR = Path("chat_data")
+DATA_DIR.mkdir(exist_ok=True)
 
-# === Allowed Free Models ===
+nltk.download('punkt', quiet=True)
+nltk.download('averaged_perceptron_tagger', quiet=True)
+
+# === Hide Streamlit default UI (menu, footer, GitHub, etc.) ===
+st.markdown("""
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .stApp a[href*='github'], .stApp a[href*='streamlit.io'] {display: none !important;}
+    </style>
+    """, unsafe_allow_html=True)
+
+# ===========================
+# 🧩 Free Models
+# ===========================
 FREE_MODELS = [
     "nvidia/nemotron-nano-9b-v2:free",
     "meta-llama/llama-3.3-8b-instruct:free",
@@ -18,29 +39,68 @@ FREE_MODELS = [
 ]
 
 # ===========================
-# 💬 Message Sending Function
+# 🧠 Bloom’s Taxonomy
 # ===========================
-def send_openrouter_message(message, model_name="minimax/minimax-m2:free"):
-    if not OPENROUTER_API_KEY:
-        return "⚠️ Missing API key. Please set OPENROUTER_API_KEY in Secrets."
+BLOOMS_LEVELS = {
+    "Knowledge": ["define", "list", "name", "recall", "identify", "label", "state"],
+    "Comprehension": ["describe", "explain", "summarize", "paraphrase", "classify", "discuss"],
+    "Application": ["apply", "demonstrate", "solve", "use", "illustrate", "show"],
+    "Analysis": ["analyze", "compare", "contrast", "differentiate", "examine", "categorize"],
+    "Synthesis": ["create", "design", "develop", "construct", "compose", "formulate"],
+    "Evaluation": ["evaluate", "judge", "critique", "assess", "justify", "appraise"],
+}
 
-    # Safety: block paid models
+def classify_blooms_level(text):
+    tokens = word_tokenize(text.lower())
+    tagged = pos_tag(tokens)
+    verbs = [word for word, tag in tagged if tag.startswith("VB")]
+    matched = []
+    for level, verbs_list in BLOOMS_LEVELS.items():
+        for verb in verbs:
+            if verb in verbs_list:
+                matched.append(level)
+    return max(set(matched), key=matched.count) if matched else "Not Classified"
+
+# ===========================
+# 🔑 Admin Authentication
+# ===========================
+def is_admin():
+    if "admin_authenticated" not in st.session_state:
+        st.session_state.admin_authenticated = False
+
+    if st.session_state.admin_authenticated:
+        return True
+
+    with st.sidebar:
+        st.subheader("🔒 Admin Login")
+        password = st.text_input("Enter admin password:", type="password")
+        if password and password == ADMIN_PASS:
+            st.session_state.admin_authenticated = True
+            st.success("✅ Admin access granted")
+            return True
+        elif password and password != ADMIN_PASS:
+            st.error("❌ Incorrect password")
+    return False
+
+# ===========================
+# 🧠 Send Message to OpenRouter
+# ===========================
+def send_openrouter_message(message, model_name):
+    if not OPENROUTER_API_KEY:
+        return "⚠️ Missing API key. Please add OPENROUTER_API_KEY in Secrets."
     paid_keywords = ["pro", "openai", "anthropic", "google", "gpt"]
     if any(k in model_name.lower() for k in paid_keywords):
         return f"🚫 '{model_name}' blocked — paid model not allowed."
-
     try:
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://streamlit.io/",
-                "X-Title": "EduChat AI",
             },
             data=json.dumps({
                 "model": model_name,
-                "messages": st.session_state.chat_history
+                "messages": [{"role": "user", "content": message}]
             }),
             timeout=40
         )
@@ -49,110 +109,126 @@ def send_openrouter_message(message, model_name="minimax/minimax-m2:free"):
     except Exception as e:
         return f"⚠️ Error: {str(e)}"
 
+# ===========================
+# 💾 File Operations (Persistence)
+# ===========================
+def save_history(session_id, data):
+    with open(DATA_DIR / f"{session_id}.json", "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+def load_history(session_id):
+    file_path = DATA_DIR / f"{session_id}.json"
+    if file_path.exists():
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
 
 # ===========================
-# 🎨 Page Configuration
+# 🎨 UI Setup
 # ===========================
-st.set_page_config(
-    page_title="EduChat AI | Student Learning Assistant",
-    page_icon="🎓",
-    layout="centered",
-    initial_sidebar_state="collapsed",
-)
+st.set_page_config(page_title="EduChat AI | Student Learning Assistant", page_icon="🎓", layout="centered")
 
-st.markdown(
-    """
-    <style>
-        body { background-color: #f9fafb; }
-        .stApp { 
-            background: linear-gradient(to right, #f3f4f6, #e5e7eb);
-        }
-        .main-title {
-            text-align: center;
-            color: #1f2937;
-            font-family: 'Helvetica Neue', sans-serif;
-        }
-        .subtitle {
-            text-align: center;
-            color: #4b5563;
-            font-size: 16px;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-st.markdown("<h1 class='main-title'>🎓 EduChat AI</h1>", unsafe_allow_html=True)
-st.markdown("<p class='subtitle'>An intelligent learning assistant for students and educators — powered by free OpenRouter models.</p>", unsafe_allow_html=True)
-st.write("")
+st.markdown("<h1 style='text-align:center; color:#1f2937;'>🎓 EduChat AI</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align:center; color:#4b5563;'>AI-based student assistant with Bloom’s Taxonomy and multi-model learning.</p>", unsafe_allow_html=True)
 
 # ===========================
-# 🧠 Initialize Session
+# 🧠 Session Management
 # ===========================
 if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())  # Unique user session
+    st.session_state.session_id = str(uuid.uuid4())
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "selected_model" not in st.session_state:
-    st.session_state.selected_model = "minimax/minimax-m2:free"
+    st.session_state.chat_history = load_history(st.session_state.session_id)
+if "votes" not in st.session_state:
+    st.session_state.votes = {}
 
-# Sidebar (Admin)
-with st.sidebar:
-    st.header("⚙️ Admin Settings")
-    st.info("Visible to admin only (not users).")
-    st.session_state.selected_model = st.selectbox(
-        "Choose Model",
-        FREE_MODELS,
-        index=2
-    )
-    st.markdown("---")
-    st.caption(f"🆔 Current Session ID: `{st.session_state.session_id}`")
+# ===========================
+# ⚙️ Admin Panel
+# ===========================
+if is_admin():
+    with st.sidebar:
+        st.header("⚙️ Admin Settings")
+        st.caption(f"🆔 Session: `{st.session_state.session_id}`")
+        st.markdown("---")
+
+# ===========================
+# 📜 History Section
+# ===========================
+st.sidebar.header("📚 Chat History")
+all_histories = [f.name.replace(".json", "") for f in DATA_DIR.glob("*.json")]
+selected_history = st.sidebar.selectbox("Select a previous session to view:", ["(Current Session)"] + all_histories)
+
+if selected_history != "(Current Session)":
+    old_data = load_history(selected_history)
+    st.sidebar.markdown("### 🧠 Previous Chat")
+    for chat in old_data[-3:]:
+        st.sidebar.write(f"💬 {chat.get('user_question')}")
+    if st.sidebar.button("Load Selected Chat"):
+        st.session_state.chat_history = old_data
+        st.sidebar.success("✅ Loaded selected session successfully!")
+
+if st.sidebar.button("➕ Start New Chat"):
+    st.session_state.session_id = str(uuid.uuid4())
+    st.session_state.chat_history = []
+    st.session_state.votes = {}
+    st.experimental_rerun()
 
 # ===========================
 # 💬 Chat Input
 # ===========================
-user_message = st.chat_input("💬 Ask me anything related to your studies...")
+question = st.text_area("💬 Ask your question:")
 
-if user_message:
-    st.session_state.chat_history.append({"role": "user", "content": user_message})
-    with st.spinner("🤖 Thinking..."):
-        bot_response = send_openrouter_message(user_message, st.session_state.selected_model)
-        st.session_state.chat_history.append({"role": "assistant", "content": bot_response})
+selected_models = st.multiselect(
+    "🧠 Choose models to compare:",
+    FREE_MODELS,
+    default=["minimax/minimax-m2:free"]
+)
 
-    # ✅ Auto-save per user session
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    filename = f"chat_{st.session_state.session_id}_{timestamp}.json"
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(st.session_state.chat_history, f, indent=4, ensure_ascii=False)
-
-# ===========================
-# 🧾 Display Chat
-# ===========================
-for msg in st.session_state.chat_history:
-    if msg["role"] == "user":
-        st.chat_message("user").write(msg["content"])
+if st.button("🚀 Get Answers"):
+    if not question.strip():
+        st.warning("Please enter a valid question.")
     else:
-        st.chat_message("assistant").write(msg["content"])
+        blooms_level = classify_blooms_level(question)
+        st.markdown(f"🧩 **Bloom’s Cognitive Level:** `{blooms_level}`")
+        st.write("---")
+
+        answers = {}
+        for model in selected_models:
+            with st.spinner(f"Fetching response from {model}..."):
+                response = send_openrouter_message(question, model)
+                st.markdown(f"### 🤖 {model}")
+                st.write(response)
+                answers[model] = response
+                st.markdown("---")
+
+        # Vote option
+        best_model = st.radio("Which model gave the best answer?", selected_models, key=str(uuid.uuid4()))
+        st.session_state.votes[question] = best_model
+        st.success(f"✅ You chose: **{best_model}**")
+
+        # Save chat persistently
+        chat_entry = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "user_question": question,
+            "bloom_level": blooms_level,
+            "answers": answers,
+            "best_model": best_model
+        }
+        st.session_state.chat_history.append(chat_entry)
+        save_history(st.session_state.session_id, st.session_state.chat_history)
 
 # ===========================
-# 💾 Download Chat
+# 💾 Download Option (with confirmation)
 # ===========================
 if st.session_state.chat_history:
-    chat_text = "\n\n".join(
-        [f"👩‍🎓 User: {m['content']}" if m['role'] == 'user' else f"🤖 EduChat: {m['content']}" for m in st.session_state.chat_history]
-    )
-    st.download_button(
-        label="⬇️ Download Chat (.txt)",
-        data=chat_text,
-        file_name=f"EduChat_{st.session_state.session_id}.txt",
-        mime="text/plain"
-    )
-    st.download_button(
-        label="⬇️ Download Chat (.json)",
-        data=json.dumps(st.session_state.chat_history, indent=4, ensure_ascii=False),
-        file_name=f"EduChat_{st.session_state.session_id}.json",
-        mime="application/json"
-    )
+    if st.checkbox("📦 Download Chat History"):
+        confirm = st.radio("Are you sure you want to download this session?", ("No", "Yes"))
+        if confirm == "Yes":
+            st.download_button(
+                label="⬇️ Download (.json)",
+                data=json.dumps(st.session_state.chat_history, indent=4, ensure_ascii=False),
+                file_name=f"EduChat_Session_{st.session_state.session_id}.json",
+                mime="application/json"
+            )
 
 # ===========================
 # 📘 Footer
@@ -161,10 +237,9 @@ st.markdown("---")
 st.markdown(
     """
     <div style='text-align:center; color:#6b7280; font-size:14px;'>
-    🧠 <b>EduChat AI</b> — your personal academic assistant.<br>
-    Built with ❤️ for students by Faizal, powered by <a href='https://openrouter.ai' target='_blank'>OpenRouter.ai</a>.
+    🧠 <b>EduChat AI</b> — Smart Learning Assistant.<br>
+    Developed by Faizal | Powered by <a href='https://openrouter.ai' target='_blank'>OpenRouter.ai</a>.
     </div>
     """,
     unsafe_allow_html=True
 )
-
